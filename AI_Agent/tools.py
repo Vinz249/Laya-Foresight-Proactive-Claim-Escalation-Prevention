@@ -1,97 +1,90 @@
 
-
 import json
 from datetime import datetime
 
-_current_scenario = None
+from database import (
+    db_get_claim_details, db_get_user_details, db_get_app_logs,
+    db_log_employee_alert, db_log_customer_email, db_log_customer_notification,
+    db_log_scheduled_callback, db_log_intervention
+)
+
+# Set at the start of each agent run by agent.py
+_current_run_id = None
 
 
-def set_current_scenario(scenario: dict):
-    """Set the active scenario so tools return the right data."""
-    global _current_scenario
-    _current_scenario = scenario
+def set_current_run_id(run_id: int):
+    global _current_run_id
+    _current_run_id = run_id
 
 
 def get_claim_details(claim_id: str) -> dict:
-    """Retrieves full details of a claim from the database."""
-    if _current_scenario and _current_scenario["claim_id"] == claim_id:
-        return _current_scenario["claim_details"]
-    return {"error": f"Claim {claim_id} not found"}
+    return db_get_claim_details(claim_id)
 
 
 def get_customer_behaviour(user_id: str, claim_id: str) -> dict:
-    """Retrieves real-time app activity for a user."""
-    if _current_scenario and _current_scenario["user_id"] == user_id:
-        return _current_scenario["customer_behaviour"]
-    return {"error": f"No behaviour data for user {user_id}"}
+    return db_get_app_logs(user_id, claim_id)
 
 
 def get_customer_history(user_id: str) -> dict:
-    """Returns the customer's history with Laya."""
-    if _current_scenario and _current_scenario["user_id"] == user_id:
-        return _current_scenario["customer_history"]
-    return {"error": f"Customer {user_id} not found"}
+    return db_get_user_details(user_id)
 
 
 def alert_employee(claim_id: str, message: str, urgency: str, sla_minutes: int = None) -> dict:
-    """Sends an alert to the Laya claims team on Slack."""
+    sla = sla_minutes or (30 if urgency == "URGENT" else 120)
+    db_log_employee_alert(_current_run_id, claim_id, message, urgency, sla)
     return {
         "sent": True,
         "channel": "#claims-alerts",
         "urgency": urgency,
-        "sla_minutes": sla_minutes or (30 if urgency == "URGENT" else 120),
+        "sla_minutes": sla,
         "timestamp": datetime.now().isoformat(),
         "message_preview": message[:100] + "..." if len(message) > 100 else message
     }
 
 
 def send_email(user_id: str, subject: str, body_html: str) -> dict:
-    """Sends an email to the customer."""
-    name = "Customer"
-    email = "customer@email.com"
-    if _current_scenario and _current_scenario["user_id"] == user_id:
-        name = _current_scenario["customer_history"]["name"]
-        email = _current_scenario["customer_history"]["email"]
+    db_log_customer_email(_current_run_id, user_id, subject, body_html)
     return {
         "sent": True,
-        "recipient": email,
-        "recipient_name": name,
+        "recipient_id": user_id,
         "subject": subject,
         "timestamp": datetime.now().isoformat()
     }
 
 
 def send_in_app_notification(user_id: str, title: str, body: str, deep_link: str = None) -> dict:
-    """Sends a push notification to the customer's phone."""
-    name = "Customer"
-    if _current_scenario and _current_scenario["user_id"] == user_id:
-        name = _current_scenario["customer_history"]["name"]
+    link = deep_link or "laya://claims"
+    db_log_customer_notification(_current_run_id, user_id, title, body, link)
     return {
         "sent": True,
-        "recipient": name,
+        "recipient_id": user_id,
         "title": title,
-        "deep_link": deep_link or "laya://claims",
+        "deep_link": link,
         "timestamp": datetime.now().isoformat()
     }
 
 
 def schedule_callback(user_id: str, claim_id: str, priority: str = "NORMAL", notes: str = "") -> dict:
-    """Schedules a proactive outbound call from a Laya agent."""
+    callback_id = f"CB-{datetime.now().strftime('%Y%m%d%H%M')}"
+    assigned_to = "Claims Team Lead — Aoife Brennan" if priority == "HIGH" else "Available Claims Agent"
+    scheduled_for = "Next available slot (within 2 hours)" if priority == "HIGH" else "Next available slot (within 24 hours)"
+    db_log_scheduled_callback(_current_run_id, callback_id, user_id, claim_id, priority, notes, assigned_to, scheduled_for)
     return {
         "scheduled": True,
-        "callback_id": f"CB-{datetime.now().strftime('%Y%m%d%H%M')}",
+        "callback_id": callback_id,
         "priority": priority,
-        "scheduled_for": "Next available slot (within 2 hours)" if priority == "HIGH" else "Next available slot (within 24 hours)",
-        "assigned_to": "Claims Team Lead — Aoife Brennan" if priority == "HIGH" else "Available Claims Agent",
+        "scheduled_for": scheduled_for,
+        "assigned_to": assigned_to,
         "timestamp": datetime.now().isoformat()
     }
 
 
 def log_intervention(claim_id: str, actions_taken: list, reasoning: str) -> dict:
-    """Records all actions taken and reasoning."""
+    intervention_id = f"INT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    db_log_intervention(_current_run_id, intervention_id, claim_id, actions_taken, reasoning)
     return {
         "logged": True,
-        "intervention_id": f"INT-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        "intervention_id": intervention_id,
         "claim_id": claim_id,
         "actions_count": len(actions_taken),
         "timestamp": datetime.now().isoformat()

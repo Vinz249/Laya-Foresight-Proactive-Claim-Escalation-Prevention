@@ -8,7 +8,11 @@ from openai import OpenAI
 from tools import (
     get_claim_details, get_customer_behaviour, get_customer_history,
     alert_employee, send_email, send_in_app_notification,
-    schedule_callback, log_intervention, set_current_scenario
+    schedule_callback, log_intervention, set_current_run_id
+)
+from database import (
+    db_create_agent_run, db_update_agent_run,
+    db_log_reasoning_step, db_log_tool_call, db_log_agent_error
 )
 
 load_dotenv()
@@ -192,12 +196,21 @@ IMPORTANT: Think step by step. Before each action, explain your reasoning clearl
 
 def run_agent_streaming(scenario: dict):
 
-    set_current_scenario(scenario)
-
     claim_id = scenario["claim_id"]
     user_id = scenario["user_id"]
     risk_score = scenario["risk_score"]
     risk_band = scenario["risk_band"]
+
+    # Create agent run record in DB
+    run_id = db_create_agent_run(
+        scenario_id=scenario["id"],
+        member_id=user_id,
+        claim_id=claim_id,
+        risk_score=risk_score,
+        risk_band=risk_band,
+        model_name=MODEL
+    )
+    set_current_run_id(run_id)
 
     yield {
         "type": "status",
@@ -246,6 +259,7 @@ Assess the situation using your tools and take appropriate action. Think step by
             )
         except Exception as e:
             error_msg = str(e)
+            db_log_agent_error(run_id, error_msg[:500])
             if "rate" in error_msg.lower() or "429" in error_msg:
                 yield {
                     "type": "error",
@@ -258,6 +272,7 @@ Assess the situation using your tools and take appropriate action. Think step by
                     "type": "error",
                     "data": {"message": f"❌ API Error: {error_msg[:200]}"}
                 }
+                db_update_agent_run(run_id, "error")
                 break
 
         choice = response.choices[0]
@@ -265,6 +280,7 @@ Assess the situation using your tools and take appropriate action. Think step by
 
         # Show reasoning text
         if message.content:
+            db_log_reasoning_step(run_id, step, message.content)
             yield {
                 "type": "reasoning",
                 "data": {
@@ -275,6 +291,7 @@ Assess the situation using your tools and take appropriate action. Think step by
 
         # Check if model is done (no tool calls)
         if choice.finish_reason == "stop" or not message.tool_calls:
+            db_update_agent_run(run_id, "complete")
             yield {
                 "type": "complete",
                 "data": {"message": "✅ Agent task complete.", "step": step}
@@ -306,6 +323,8 @@ Assess the situation using your tools and take appropriate action. Think step by
             else:
                 result = {"error": f"Unknown tool: {fn_name}"}
 
+            db_log_tool_call(run_id, step, fn_name, fn_args, result)
+
             yield {
                 "type": "tool_result",
                 "data": {
@@ -324,6 +343,7 @@ Assess the situation using your tools and take appropriate action. Think step by
 
         # Safety: max 6 loops
         if step >= 6:
+            db_update_agent_run(run_id, "max_steps")
             yield {
                 "type": "complete",
                 "data": {"message": "⚠️ Agent reached max steps (6). Ending.", "step": step}
