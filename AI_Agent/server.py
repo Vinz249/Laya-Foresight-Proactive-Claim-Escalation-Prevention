@@ -14,14 +14,6 @@ load_dotenv()
 from agent import run_agent_streaming
 
 
-# In-memory store for ML-ingested scenarios
-_ingested_scenarios: list[dict] = []
-
-
-def _get_scenario(scenario_id: str) -> dict | None:
-    return next((s for s in _ingested_scenarios if s["id"] == scenario_id), None)
-
-
 app = FastAPI(title="LayaAIAgent Dashboard", version="1.0.0")
 
 app.add_middleware(
@@ -40,8 +32,8 @@ async def serve_dashboard():
 
 @app.post("/api/ingest")
 async def ingest_prediction(request: Request):
-    """Receive ML model prediction, enrich with DB data, and store as a scenario."""
-    from database import db_get_claim_details, db_get_user_details, db_get_app_logs, db_log_ml_prediction
+    """Receive ML model prediction and store in DB."""
+    from database import db_get_claim_details, db_get_user_details, db_log_ml_prediction
 
     body = await request.json()
 
@@ -51,47 +43,22 @@ async def ingest_prediction(request: Request):
     predicted_risk = int(body.get("predicted_risk", 0))
     risk_band = "HIGH" if probability >= 0.7 else ("MEDIUM" if probability >= 0.4 else "LOW")
 
-    claim = db_get_claim_details(claim_id) if claim_id else {}
-    user = db_get_user_details(member_id) if member_id else {}
-    app_logs = db_get_app_logs(member_id, claim_id) if member_id and claim_id else []
-
-    scenario_id = f"pred_{member_id}"
-    scenario = {
-        "id": scenario_id,
-        "risk_band": risk_band,
-        "risk_score": probability,
-        "claim_id": claim_id,
-        "user_id": member_id,
-        "claim": claim if "error" not in claim else {},
-        "user": user if "error" not in user else {},
-        "app_logs": app_logs if isinstance(app_logs, list) else [],
-    }
-
-    existing = next((i for i, s in enumerate(_ingested_scenarios) if s["id"] == scenario_id), None)
-    if existing is not None:
-        _ingested_scenarios[existing] = scenario
-    else:
-        _ingested_scenarios.append(scenario)
-
     db_log_ml_prediction(member_id, claim_id, predicted_risk, probability, risk_band)
     print(f"📥 Ingested: {member_id} | claim={claim_id} | {risk_band} ({probability:.4f})")
-    return {"status": "ok", "scenario_id": scenario_id, "risk_band": risk_band}
+    return {"status": "ok", "scenario_id": f"pred_{member_id}", "risk_band": risk_band}
 
 
 @app.get("/api/scenarios")
 async def list_scenarios():
-    return {"scenarios": _ingested_scenarios}
-
-
-@app.post("/api/reset")
-async def reset_scenarios():
-    _ingested_scenarios.clear()
-    return {"status": "ok"}
+    from database import db_get_scenarios
+    return {"scenarios": db_get_scenarios()}
 
 
 @app.get("/api/run/{scenario_id}")
 async def run_scenario_stream(scenario_id: str, request: Request):
-    scenario = _get_scenario(scenario_id)
+    from database import db_get_scenarios
+    scenarios = db_get_scenarios()
+    scenario = next((s for s in scenarios if s["id"] == scenario_id), None)
     if not scenario:
         return {"error": f"Scenario {scenario_id} not found"}
 

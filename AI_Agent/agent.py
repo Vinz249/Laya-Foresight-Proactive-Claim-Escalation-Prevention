@@ -107,9 +107,10 @@ TOOLS = [
                 "properties": {
                     "user_id": {"type": "string"},
                     "subject": {"type": "string"},
-                    "body_html": {"type": "string", "description": "Warm, specific HTML email body."}
+                    "body_html": {"type": "string", "description": "Warm, specific HTML email body."},
+                    "to_email": {"type": "string", "description": "The recipient's email address."}
                 },
-                "required": ["user_id", "subject", "body_html"]
+                "required": ["user_id", "subject", "body_html", "to_email"]
             }
         }
     },
