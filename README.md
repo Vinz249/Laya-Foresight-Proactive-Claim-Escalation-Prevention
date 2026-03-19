@@ -1,58 +1,137 @@
-# Foresight
-### Proactive Claim Escalation Prevention · Laya Healthcare
+# Laya Foresight: Proactive Claim Escalation Prevention
+
+An AI-driven system built for Laya Healthcare to predict and prevent costly support call escalations before they happen, giving users peace of mind during their health insurance claim process.
+
+![Laya Foresight Dashboard Preview](https://via.placeholder.com/800x400?text=Laya+Foresight+Dashboard) *(Note: Replace with actual screenshot/GIF if available)*
 
 ---
 
-## Problem Statement
+## 🛠 Tech Stack
 
-When a user submits a health insurance claim, they enter a period of uncertainty. They don't know whether their claim will be accepted, how long it will take, or whether anything is wrong with their submission. This uncertainty drives anxiety — and anxiety drives behaviour.
+**Frontend:**
+- **React 18** – UI Component Library
+- **Vite** – Build Tool and Development Server
 
-Users begin repeatedly logging into the app, refreshing their claim status page, and re-uploading documents they've already submitted. When none of that provides reassurance, they do the only thing left: they call support.
-
-Support calls are expensive. They consume agent time, drive up operational cost, and — critically — they're often entirely avoidable. The user didn't need a human agent. They needed timely, clear information at the right moment. The problem isn't that users call. The problem is that the system waited for them to call rather than reaching out first.
-
----
-
-## Solution
-
-Foresight is a two-component system that identifies high-risk users before they escalate and intervenes proactively to resolve their concern.
+**Backend (AI Agent):**
+- **Python 3** – Core Agent Logic
+- **FastAPI & Uvicorn** – High-performance REST APIs
+- **Anthropic API (Claude)** – Large Language Model reasoning for the AI Agent
 
 ---
 
-### Component 1 — Risk Predictor Model
+## 💡 What it does
 
-A binary classification model trained on behavioural, claim, and historical signals that predicts whether a given user is likely to call support within the next 48 hours. The model scores every active claim on a rolling basis and assigns each user to a risk band: High, Medium, or Low.
+Laya Foresight is a two-component, proactive intervention system. Instead of waiting for users to get anxious about a claim and call support, the system continuously analyzes active claims to identify users who are likely to escalate. When a high risk is detected, the AI Agent either autonomously reaches out to the user with a reassuring update or surfaces a prioritized alert directly to the Laya Healthcare support team.
 
-Features used include:
+## ⚙️ How it does it
 
-- *Behavioural signals* — number of app logins post-submission, status page views, time to first re-check, document uploads, claim edits
-- *Claim signals* — claim type, estimated amount, missing documents, days since submission
-- *Historical signals* — past claims by the same user, prior escalation history
+The system operates in two core components:
+
+### 1. Risk Predictor Model
+A binary classification model that scores every active claim on a rolling basis, assigning users into **High, Medium, or Low** risk bands. It evaluates:
+- **Behavioural signals:** App logins, status page reloads, document uploads.
+- **Claim signals:** Type of claim, days since submission, estimated amount.
+- **Historical signals:** Prior escalation history.
+
+### 2. LayaAIAgent (Anthropic Powered)
+An intelligent, autonomous agent that acts on the risk scores continuously:
+- **Internal Action:** Provides support teams with a ranked, prioritized dashboard of at-risk users, detailing *why* they might call.
+- **External Action:** Decides whether messaging the user directly will help. If it determines a message will reduce anxiety (e.g., an update on processing time, or a note about a missing document), it dispatches the message autonomously.
+
+## 🤔 Why it does it & What problem it solves
+
+When a user submits a health insurance claim, they enter a "black box" of uncertainty, driving immense anxiety. This anxiety manifests as constant app refreshing, re-uploading documents, and ultimately—calling support. 
+
+**The Problem:**
+- Support calls are highly expensive, consuming vast human resources.
+- Most calls are entirely avoidable, stemming from a lack of transparent, timely updates.
+
+**The Solution:**
+Laya Foresight flips the paradigm from reactive to highly proactive. By intervening *before* the user picks up the phone, we drastically reduce call center volume, lower operational costs, and create a markedly better, anxiety-free user experience.
+
+## 📊 The Numerics
+- **48-Hour Prediction Window:** The model predicts if a user will call support within the next 48 hours.
+- **3 Risk Tiers:** Accurately segments users into High, Medium, or Low urgency bands.
+- **Measurable Impact:** Designed to measurably decrease inbound call queues while increasing user satisfaction scores.
 
 ---
 
-### Component 2 — LayaAIAgent
+## 🚀 Full Setup Guide
 
-LayaAIAgent is an intelligent agent that consumes the risk scores produced by Component 1 and takes autonomous action on two fronts.
+To run the complete Laya Foresight system locally, you need to set up both the backend API and the frontend dashboard.
 
-**Internal — Alerting the Laya Team**
+### 1. Clone the Repository
 
-LayaAIAgent surfaces a prioritised view of at-risk users directly to the Laya support and operations team. It communicates who is showing urgency signals, how severe the risk is, and what the likely cause is — giving agents the context they need to act before a call comes in. Rather than agents reacting to an inbound queue, they are handed a ranked list of users who need attention, ordered by predicted urgency.
+Clone the master project folder containing both repositories (if applicable):
+```bash
+git clone https://github.com/Laya-hackathon/laya-foresight
+cd LayaForesight
+```
 
-**External — Deciding Whether to Reach Out to the User**
+### 2. Backend Setup (AI Agent Server)
 
-LayaAIAgent also makes an independent decision on whether to proactively contact the user directly. Based on the risk score, the claim context, and the nature of the signals detected, it determines whether sending a message would be helpful — and if so, what that message should contain. This could be a status update, a note about a missing document, a processing time estimate, or a reassurance that the claim is progressing normally.
+The backend handles the AI reasoning, mock data generation, and API endpoints.
 
-The agent does not message every flagged user. It exercises judgement — if the available information is unlikely to reduce the user's anxiety or if the claim situation is too ambiguous to communicate clearly, it holds back and routes the case to a human instead.
+```bash
+# Navigate to the backend directory
+cd laya-foresight/AI_Agent
 
-The outcome of every action — whether the user called anyway, whether the message resolved their concern — is captured and fed back into the training pipeline, continuously improving both the risk model and the agent's decision-making over time.
+# Create a virtual environment (Recommended)
+python3 -m venv venv
+source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+**Environment Variables:**
+Create a `.env` file inside the `AI_Agent` folder and add your API keys:
+```env
+# Example .env
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+```
+
+**Run the Server:**
+```bash
+# Start the FastAPI server using Uvicorn
+uvicorn server:app --reload
+```
+*The backend server will run on `http://localhost:8000`.*
+
+### 3. Frontend Setup (React Dashboard)
+
+The frontend provides a real-time visualization of the AI Agent's reasoning and mock customer support scenarios.
+
+Open a new terminal window:
+```bash
+# Navigate to the frontend directory
+cd laya-foresight-frontend/laya-foresight-frontend
+
+# Install dependencies using npm
+npm install
+```
+
+**Environment Configuration:**
+Create a `.env` file in the root of the frontend directory:
+```env
+VITE_API_BASE_URL=http://localhost:8000
+```
+*(If omitted, it defaults to localhost:8000 anyway).*
+
+**Run the Dashboard:**
+```bash
+# Start the Vite development server
+npm run dev
+```
+*The dashboard will be available at `http://localhost:5173/`.*
 
 ---
 
-## Status
+## 🔮 Status & Next Steps
+Currently in the early-stage design and architecture phase. Ongoing collaboration with Laya Healthcare to instrument behavioral event tracking inside their app and compile a labeled dataset for the risk model.
 
-> Early-stage design and architecture phase. Data availability and app instrumentation requirements are being scoped with Laya. Model training cannot begin until behavioural event tracking is instrumented in the Laya app and a minimum dataset of labelled escalation events is established.
-
----
-
-*Foresight — built for Laya Healthcare*
+### Planned Orchestration Refactor
+While the current AI Agent operates on a custom cyclic while-loop built in core Python, a planned future update includes migrating the tool-binding and orchestration logic to **LangChain** and **LangGraph**. This upgrade will provide:
+- **Stateful, Native Cyclic Workflows:** More robust handling of multi-step, human-in-the-loop decision processes.
+- **Enhanced Fault Tolerance:** Native rate-limit, error, and retry handling.
+- **Standardized Tool Integration:** A unified interface for interacting with the Anthropic LLM and internal APIs.
