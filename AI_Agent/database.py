@@ -43,6 +43,7 @@ def db_get_app_logs(user_id: str, claim_id: str) -> list:
             cur.execute("""
                 SELECT * FROM app_logs
                 WHERE user_id = %s AND claim_id = %s
+                  AND timestamp >= NOW() - INTERVAL '48 hours'
                 ORDER BY timestamp ASC
             """, (user_id, claim_id))
             rows = cur.fetchall()
@@ -297,6 +298,47 @@ def db_get_chart_data() -> list:
 
 
 # ---------------------------------------------------------------------------
+# All claims (with user info + latest ML prediction if flagged)
+# ---------------------------------------------------------------------------
+
+def db_get_all_claims() -> list:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    c.claim_id, c.user_id, c.treatment_type, c.claim_amount,
+                    c.submission_timestamp, c.submission_channel,
+                    c.missing_documents_flag, c.adjudicator_flag,
+                    c.claim_rejected_flag, c.resubmission_flag, c.original_claim_id,
+                    u.first_name, u.last_name, u.email,
+                    u.age_group, u.region, u.plan_type,
+                    u.membership_tenure_years, u.past_escalation_count,
+                    u.behavior_archetype,
+                    p.risk_band, p.risk_probability,
+                    p.created_at AS predicted_at
+                FROM claims c
+                LEFT JOIN users_backup u ON u.user_id = c.user_id
+                LEFT JOIN (
+                    SELECT DISTINCT ON (member_id)
+                        member_id, risk_band, risk_probability, created_at
+                    FROM aa_ml_predictions
+                    ORDER BY member_id, prediction_id DESC
+                ) p ON p.member_id = c.user_id
+                ORDER BY
+                    CASE
+                        WHEN p.risk_band = 'HIGH'   THEN 1
+                        WHEN p.risk_band = 'MEDIUM' THEN 2
+                        WHEN p.risk_band = 'LOW'    THEN 3
+                        ELSE 4
+                    END,
+                    p.risk_probability DESC NULLS LAST,
+                    c.submission_timestamp DESC
+            """)
+            rows = cur.fetchall()
+    return [dict(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
 # Scenarios (built from aa_ml_predictions + live DB lookups)
 # ---------------------------------------------------------------------------
 
@@ -392,6 +434,76 @@ def db_get_run_history(scenario_id: str) -> list:
     msg = "✅ Agent task complete." if status == "complete" else f"⚠️ Agent ended ({status})"
     events.append({"type": "complete", "data": {"message": msg}})
     return events
+
+
+# ---------------------------------------------------------------------------
+# Reports (completed agent runs with full context)
+# ---------------------------------------------------------------------------
+
+def db_get_reports() -> list:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    ar.run_id, ar.scenario_id, ar.member_id, ar.claim_id,
+                    ar.risk_score, ar.risk_band, ar.status,
+                    ar.started_at, ar.ended_at,
+                    EXTRACT(EPOCH FROM (ar.ended_at - ar.started_at))::int AS duration_sec,
+                    u.first_name, u.last_name, u.plan_type, u.region,
+                    c.treatment_type, c.claim_amount,
+                    i.actions_taken, i.reasoning AS agent_reasoning, i.actions_count,
+                    (SELECT COUNT(*) FROM aa_customer_emails      e WHERE e.run_id = ar.run_id) AS emails_sent,
+                    (SELECT COUNT(*) FROM aa_customer_notifications n WHERE n.run_id = ar.run_id) AS push_sent,
+                    (SELECT COUNT(*) FROM aa_scheduled_callbacks   cb WHERE cb.run_id = ar.run_id) AS callbacks,
+                    (SELECT COUNT(*) FROM aa_employee_alerts       ea WHERE ea.run_id = ar.run_id) AS alerts
+                FROM aa_agent_runs ar
+                LEFT JOIN users_backup u ON u.user_id = ar.member_id
+                LEFT JOIN claims       c ON c.claim_id = ar.claim_id
+                LEFT JOIN aa_interventions i ON i.run_id = ar.run_id
+                WHERE ar.status IN ('complete', 'max_steps')
+                ORDER BY ar.started_at DESC
+            """)
+            rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+def db_get_report_detail(run_id: int) -> dict:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            # Final AI summary = last reasoning step text
+            cur.execute("""
+                SELECT reasoning_text FROM aa_agent_reasoning_steps
+                WHERE run_id = %s ORDER BY step_number DESC LIMIT 1
+            """, (run_id,))
+            last_row = cur.fetchone()
+
+            cur.execute("SELECT COUNT(*) AS cnt FROM aa_agent_tool_calls       WHERE run_id = %s", (run_id,))
+            tool_count = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT COUNT(*) AS cnt FROM aa_agent_reasoning_steps WHERE run_id = %s", (run_id,))
+            reasoning_count = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT subject, body_html, created_at FROM aa_customer_emails WHERE run_id = %s ORDER BY created_at", (run_id,))
+            emails = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("SELECT title, body, created_at FROM aa_customer_notifications WHERE run_id = %s ORDER BY created_at", (run_id,))
+            notifications = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("SELECT callback_id, priority, notes, scheduled_for FROM aa_scheduled_callbacks WHERE run_id = %s", (run_id,))
+            callbacks = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("SELECT message, urgency, sla_minutes, created_at FROM aa_employee_alerts WHERE run_id = %s ORDER BY created_at", (run_id,))
+            alerts = [dict(r) for r in cur.fetchall()]
+
+    return {
+        "ai_summary":           last_row["reasoning_text"] if last_row else None,
+        "tool_call_count":      tool_count,
+        "reasoning_step_count": reasoning_count,
+        "emails":               emails,
+        "notifications":        notifications,
+        "callbacks":            callbacks,
+        "alerts":               alerts,
+    }
 
 
 if __name__ == "__main__":

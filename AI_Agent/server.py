@@ -111,6 +111,19 @@ async def run_scenario_stream(scenario_id: str, request: Request):
     )
 
 
+@app.get("/api/claims")
+async def get_claims():
+    from database import db_get_all_claims
+    return {"claims": db_get_all_claims()}
+
+
+@app.get("/api/claims/{claim_id}/activity")
+async def get_claim_activity(claim_id: str, user_id: str):
+    from database import db_get_app_logs
+    logs = db_get_app_logs(user_id, claim_id)
+    return {"logs": logs if isinstance(logs, list) else []}
+
+
 @app.get("/api/history/{scenario_id}")
 async def get_history(scenario_id: str):
     from database import db_get_run_history
@@ -133,6 +146,18 @@ async def get_feed():
 async def get_chart():
     from database import db_get_chart_data
     return {"bins": db_get_chart_data()}
+
+
+@app.get("/api/reports")
+async def get_reports():
+    from database import db_get_reports
+    return {"reports": db_get_reports()}
+
+
+@app.get("/api/reports/{run_id}")
+async def get_report_detail(run_id: int):
+    from database import db_get_report_detail
+    return db_get_report_detail(run_id)
 
 
 @app.get("/api/health")
