@@ -297,6 +297,42 @@ def db_get_chart_data() -> list:
 
 
 # ---------------------------------------------------------------------------
+# Scenarios (built from aa_ml_predictions + live DB lookups)
+# ---------------------------------------------------------------------------
+
+def db_get_scenarios() -> list:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            # Latest prediction per member
+            cur.execute("""
+                SELECT DISTINCT ON (member_id)
+                    member_id, claim_id, risk_probability, risk_band
+                FROM aa_ml_predictions
+                ORDER BY member_id, prediction_id DESC
+            """)
+            rows = cur.fetchall()
+
+    scenarios = []
+    for row in rows:
+        member_id = row["member_id"]
+        claim_id = row["claim_id"]
+        claim = db_get_claim_details(claim_id) if claim_id else {}
+        user = db_get_user_details(member_id) if member_id else {}
+        app_logs = db_get_app_logs(member_id, claim_id) if member_id and claim_id else []
+        scenarios.append({
+            "id": f"pred_{member_id}",
+            "risk_band": row["risk_band"],
+            "risk_score": row["risk_probability"],
+            "claim_id": claim_id,
+            "user_id": member_id,
+            "claim": claim if "error" not in claim else {},
+            "user": user if "error" not in user else {},
+            "app_logs": app_logs if isinstance(app_logs, list) else [],
+        })
+    return scenarios
+
+
+# ---------------------------------------------------------------------------
 # Agent run history (for drawer replay on reload)
 # ---------------------------------------------------------------------------
 

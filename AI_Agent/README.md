@@ -37,15 +37,24 @@ Install the required packages using pip:
 ```bash
 pip install -r requirements.txt
 ```
-*(Dependencies include FastAPI, Uvicorn, Python-Dotenv, and Anthropic's SDK)*
+*(Dependencies include FastAPI, Uvicorn, Python-Dotenv, OpenAI SDK, psycopg2)*
 
 ### 4. Environment Variables
-Create a `.env` file in the root of the backend folder (`AI Agent`) and add the necessary configuration. Example:
+Create a `.env` file in the root of the backend folder (`AI_Agent`) and add the necessary configuration:
 ```env
+# GitHub Models API token (used to call gpt-4o-mini via Azure inference)
 GITHUB_TOKEN=your_github_token_here
+
+# AI model to use (default: gpt-4o-mini)
 MODEL=gpt-4o-mini
+
+# PostgreSQL connection string (Supabase or self-hosted)
+DATABASE_URL=postgresql://user:password@host:port/dbname
+
+# Brevo (email sending)
+EMAIL_API_KEY=your_brevo_api_key_here
+EMAIL_ADDRESS=your_sender_email@domain.com
 ```
-*Note: Make sure to replace `your_github_token_here` with a valid token.*
 
 ## Running Locally
 
@@ -66,6 +75,10 @@ The standard backend API will run on **`http://localhost:8000`**.
 ## Key API Endpoints
 - `GET /` : Serves a built-in demo dashboard (if using the bundled HTML).
 - `GET /api/health` : Checks server status, API token configuration, and selected model.
-- `GET /api/scenarios` : Lists all available simulation scenarios.
+- `POST /api/ingest` : Receives an ML model prediction and stores it in the database.
+- `GET /api/scenarios` : Lists all scenarios built from database predictions.
 - `GET /api/run/{scenario_id}` : Starts an agent session for a given scenario, streaming output via Server-Sent Events (SSE).
-- `GET /api/run-all` : Runs all test scenarios sequentially.
+- `GET /api/history/{scenario_id}` : Returns the stored reasoning and tool calls for a completed run.
+- `GET /api/stats` : Returns today's dashboard statistics (risk counts, actions taken).
+- `GET /api/feed` : Returns the latest activity feed across all action tables.
+- `GET /api/chart` : Returns risk score distribution data for the bar chart.

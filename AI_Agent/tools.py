@@ -1,12 +1,18 @@
 
 import json
 from datetime import datetime
+import requests
+import os
 
 from database import (
     db_get_claim_details, db_get_user_details, db_get_app_logs,
     db_log_employee_alert, db_log_customer_email, db_log_customer_notification,
     db_log_scheduled_callback, db_log_intervention
 )
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Set at the start of each agent run by agent.py
 _current_run_id = None
@@ -42,10 +48,28 @@ def alert_employee(claim_id: str, message: str, urgency: str, sla_minutes: int =
     }
 
 
-def send_email(user_id: str, subject: str, body_html: str) -> dict:
+def send_email(user_id: str, subject: str, body_html: str, to_email: str) -> dict:
     db_log_customer_email(_current_run_id, user_id, subject, body_html)
+
+    url = "https://api.brevo.com/v3/smtp/email"
+
+    payload = json.dumps({
+        "sender": {"name": "Laya Claims Team", "email": os.getenv("EMAIL_ADDRESS")},
+        "to": [{"email": "sivaavanishk@gmail.com"}],
+        "subject": subject,
+        "textContent": body_html
+    })
+
+    headers = {
+        "accept": "application/json",
+        "api-key": os.getenv("EMAIL_API_KEY"),
+        "content-type": "application/json"
+    }
+
+    response = requests.post(url, headers=headers, data=payload)
+    print(response.status_code, response.text)
     return {
-        "sent": True,
+        "sent": response.status_code == 201,
         "recipient_id": user_id,
         "subject": subject,
         "timestamp": datetime.now().isoformat()
