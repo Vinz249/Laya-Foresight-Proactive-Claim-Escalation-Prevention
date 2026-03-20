@@ -43,7 +43,7 @@ def db_get_app_logs(user_id: str, claim_id: str) -> list:
             cur.execute("""
                 SELECT * FROM app_logs
                 WHERE user_id = %s AND claim_id = %s
-                  AND timestamp >= NOW() - INTERVAL '48 hours'
+                  AND timestamp::timestamptz >= NOW() - INTERVAL '48 hours'
                 ORDER BY timestamp ASC
             """, (user_id, claim_id))
             rows = cur.fetchall()
@@ -504,6 +504,143 @@ def db_get_report_detail(run_id: int) -> dict:
         "callbacks":            callbacks,
         "alerts":               alerts,
     }
+
+
+# ---------------------------------------------------------------------------
+# Human-in-the-loop tables setup
+# ---------------------------------------------------------------------------
+
+def db_setup_hitl_tables():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS aa_employee_questions (
+                    question_id  SERIAL PRIMARY KEY,
+                    run_id       INTEGER,
+                    scenario_id  VARCHAR,
+                    claim_id     VARCHAR,
+                    question     TEXT NOT NULL,
+                    context      TEXT,
+                    tool_call_id VARCHAR NOT NULL,
+                    response     TEXT,
+                    status       VARCHAR DEFAULT 'pending',
+                    created_at   TIMESTAMPTZ DEFAULT NOW(),
+                    responded_at TIMESTAMPTZ
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS aa_agent_paused_state (
+                    run_id          INTEGER PRIMARY KEY,
+                    scenario_id     VARCHAR,
+                    message_history JSONB NOT NULL,
+                    step            INTEGER DEFAULT 0,
+                    created_at      TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# aa_employee_questions
+# ---------------------------------------------------------------------------
+
+def db_log_employee_question(run_id: int, scenario_id: str, claim_id: str, question: str, context: str, tool_call_id: str) -> int:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO aa_employee_questions (run_id, scenario_id, claim_id, question, context, tool_call_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING question_id
+            """, (run_id, scenario_id, claim_id, question, context, tool_call_id))
+            qid = cur.fetchone()["question_id"]
+        conn.commit()
+    return qid
+
+
+def db_respond_to_question(question_id: int, response: str):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE aa_employee_questions
+                SET response = %s, status = 'responded', responded_at = NOW()
+                WHERE question_id = %s
+            """, (response, question_id))
+        conn.commit()
+
+
+def db_get_question(question_id: int) -> dict:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM aa_employee_questions WHERE question_id = %s", (question_id,))
+            row = cur.fetchone()
+    return dict(row) if row else {}
+
+
+def db_get_pending_questions() -> list:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT q.*,
+                       u.first_name, u.last_name,
+                       c.treatment_type, c.claim_amount,
+                       ar.risk_band
+                FROM aa_employee_questions q
+                LEFT JOIN aa_agent_runs ar ON ar.run_id = q.run_id
+                LEFT JOIN users_backup u ON u.user_id = ar.member_id
+                LEFT JOIN claims c ON c.claim_id = q.claim_id
+                WHERE q.status = 'pending'
+                ORDER BY q.created_at DESC
+            """)
+            rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# aa_agent_paused_state
+# ---------------------------------------------------------------------------
+
+def db_save_paused_state(run_id: int, scenario_id: str, messages: list, step: int):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO aa_agent_paused_state (run_id, scenario_id, message_history, step)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (run_id) DO UPDATE
+                SET message_history = EXCLUDED.message_history, step = EXCLUDED.step
+            """, (run_id, scenario_id, json.dumps(messages, default=str), step))
+        conn.commit()
+
+
+def db_get_paused_state(run_id: int) -> dict:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM aa_agent_paused_state WHERE run_id = %s", (run_id,))
+            row = cur.fetchone()
+    if not row:
+        return {}
+    d = dict(row)
+    if isinstance(d["message_history"], str):
+        d["message_history"] = json.loads(d["message_history"])
+    return d
+
+
+def db_get_all_alerts() -> list:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    ea.run_id, ea.claim_id, ea.message, ea.urgency, ea.sla_minutes, ea.created_at,
+                    u.first_name, u.last_name,
+                    c.treatment_type, c.claim_amount,
+                    ar.risk_band, ar.risk_score
+                FROM aa_employee_alerts ea
+                LEFT JOIN aa_agent_runs ar ON ar.run_id = ea.run_id
+                LEFT JOIN users_backup u ON u.user_id = ar.member_id
+                LEFT JOIN claims c ON c.claim_id = ea.claim_id
+                ORDER BY ea.created_at DESC
+            """)
+            rows = cur.fetchall()
+    return [dict(r) for r in rows]
 
 
 if __name__ == "__main__":
