@@ -1,15 +1,49 @@
 
 import os
 import json
+import threading
 import psycopg2
 import psycopg2.extras
+from contextlib import contextmanager
+from psycopg2.pool import ThreadedConnectionPool
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# ---------------------------------------------------------------------------
+# Connection pool — reuses TCP connections instead of opening a new one
+# on every query (was the primary cause of 14-26s response times).
+# ---------------------------------------------------------------------------
 
+_pool: ThreadedConnectionPool | None = None
+_pool_lock = threading.Lock()
+
+
+def _get_pool() -> ThreadedConnectionPool:
+    global _pool
+    if _pool is None:
+        with _pool_lock:
+            if _pool is None:
+                _pool = ThreadedConnectionPool(
+                    2, 10,
+                    dsn=os.getenv("DATABASE_URL"),
+                    cursor_factory=psycopg2.extras.RealDictCursor,
+                )
+    return _pool
+
+
+@contextmanager
 def get_connection():
-    return psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=psycopg2.extras.RealDictCursor)
+    pool = _get_pool()
+    conn = pool.getconn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +77,7 @@ def db_get_app_logs(user_id: str, claim_id: str) -> list:
             cur.execute("""
                 SELECT * FROM app_logs
                 WHERE user_id = %s AND claim_id = %s
+                  AND timestamp::timestamptz >= NOW() - INTERVAL '48 hours'
                 ORDER BY timestamp ASC
             """, (user_id, claim_id))
             rows = cur.fetchall()
@@ -213,45 +248,48 @@ def db_log_agent_error(run_id: int, error_message: str):
 # ---------------------------------------------------------------------------
 
 def db_get_stats() -> dict:
+    # Single round-trip: all counts in one query using CROSS JOIN subqueries.
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT
-                    COUNT(*) FILTER (WHERE risk_band = 'HIGH')   AS high_risk,
-                    COUNT(*) FILTER (WHERE risk_band = 'MEDIUM') AS medium_risk,
-                    COUNT(*) FILTER (WHERE risk_band = 'LOW')    AS low_risk,
-                    COUNT(*)                                      AS total
-                FROM aa_ml_predictions
-                WHERE DATE(created_at) = CURRENT_DATE
+                    p.high_risk, p.medium_risk, p.low_risk, p.total_predictions,
+                    COALESCE(i.calls_prevented, 0)  AS calls_prevented,
+                    COALESCE(e.emails_sent,     0)  AS emails_sent,
+                    COALESCE(n.push_sent,       0)  AS push_sent,
+                    COALESCE(ea.slack_sent,     0)  AS slack_sent,
+                    COALESCE(tc.total_actions,  0)  AS total_actions,
+                    COALESCE(ar.active_cases,   0)  AS active_cases,
+                    COALESCE(ar.processed_today,0)  AS processed_today,
+                    COALESCE(ar.complete_runs,  0)  AS complete_runs,
+                    COALESCE(ar.total_runs,     0)  AS total_runs,
+                    CASE
+                        WHEN COALESCE(ar.total_runs, 0) = 0 THEN 0
+                        ELSE ROUND(100.0 * ar.complete_runs / ar.total_runs, 1)
+                    END AS success_rate
+                FROM (
+                    SELECT
+                        COUNT(*) FILTER (WHERE risk_band = 'HIGH')   AS high_risk,
+                        COUNT(*) FILTER (WHERE risk_band = 'MEDIUM') AS medium_risk,
+                        COUNT(*) FILTER (WHERE risk_band = 'LOW')    AS low_risk,
+                        COUNT(*)                                      AS total_predictions
+                    FROM aa_ml_predictions
+                ) p
+                CROSS JOIN (SELECT COUNT(*) AS calls_prevented FROM aa_interventions         ) i
+                CROSS JOIN (SELECT COUNT(*) AS emails_sent     FROM aa_customer_emails       ) e
+                CROSS JOIN (SELECT COUNT(*) AS push_sent       FROM aa_customer_notifications) n
+                CROSS JOIN (SELECT COUNT(*) AS slack_sent      FROM aa_employee_alerts       ) ea
+                CROSS JOIN (SELECT COUNT(*) AS total_actions   FROM aa_agent_tool_calls      ) tc
+                CROSS JOIN (
+                    SELECT
+                        COUNT(*) FILTER (WHERE status = 'running')                              AS active_cases,
+                        COUNT(*) FILTER (WHERE ended_at >= CURRENT_DATE)                        AS processed_today,
+                        COUNT(*) FILTER (WHERE status = 'complete')                             AS complete_runs,
+                        COUNT(*) FILTER (WHERE status IN ('complete', 'max_steps', 'error'))    AS total_runs
+                    FROM aa_agent_runs
+                ) ar
             """)
-            predictions = dict(cur.fetchone())
-
-            cur.execute("SELECT COUNT(*) AS cnt FROM aa_interventions WHERE DATE(created_at) = CURRENT_DATE")
-            prevented = cur.fetchone()["cnt"]
-
-            cur.execute("SELECT COUNT(*) AS cnt FROM aa_customer_emails WHERE DATE(created_at) = CURRENT_DATE")
-            emails = cur.fetchone()["cnt"]
-
-            cur.execute("SELECT COUNT(*) AS cnt FROM aa_customer_notifications WHERE DATE(created_at) = CURRENT_DATE")
-            push = cur.fetchone()["cnt"]
-
-            cur.execute("SELECT COUNT(*) AS cnt FROM aa_employee_alerts WHERE DATE(created_at) = CURRENT_DATE")
-            slack = cur.fetchone()["cnt"]
-
-            cur.execute("SELECT COUNT(*) AS cnt FROM aa_agent_tool_calls WHERE DATE(created_at) = CURRENT_DATE")
-            total_actions = cur.fetchone()["cnt"]
-
-    return {
-        "high_risk": predictions["high_risk"],
-        "medium_risk": predictions["medium_risk"],
-        "low_risk": predictions["low_risk"],
-        "total_predictions": predictions["total"],
-        "calls_prevented": prevented,
-        "emails_sent": emails,
-        "push_sent": push,
-        "slack_sent": slack,
-        "total_actions": total_actions,
-    }
+            return dict(cur.fetchone())
 
 
 def db_get_feed(limit: int = 20) -> list:
@@ -277,23 +315,65 @@ def db_get_feed(limit: int = 20) -> list:
 
 
 def db_get_chart_data() -> list:
-    bins = [
-        (0.0, 0.2), (0.2, 0.4), (0.4, 0.5),
-        (0.5, 0.6), (0.6, 0.7), (0.7, 0.8),
-        (0.8, 0.9), (0.9, 1.01)
-    ]
     colors = ['#86efac', '#4ade80', '#fcd34d', '#fbbf24', '#f97316', '#f43f5e', '#e11d48', '#be123c']
+    # One table scan with FILTER instead of 8 separate queries in a loop.
     with get_connection() as conn:
         with conn.cursor() as cur:
-            result = []
-            for (lo, hi), col in zip(bins, colors):
-                cur.execute("""
-                    SELECT COUNT(*) AS cnt FROM aa_ml_predictions
-                    WHERE risk_probability >= %s AND risk_probability < %s
-                """, (lo, hi))
-                count = cur.fetchone()["cnt"]
-                result.append({"c": count, "col": col})
-    return result
+            cur.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE risk_probability >= 0.0 AND risk_probability < 0.2) AS bin0,
+                    COUNT(*) FILTER (WHERE risk_probability >= 0.2 AND risk_probability < 0.4) AS bin1,
+                    COUNT(*) FILTER (WHERE risk_probability >= 0.4 AND risk_probability < 0.5) AS bin2,
+                    COUNT(*) FILTER (WHERE risk_probability >= 0.5 AND risk_probability < 0.6) AS bin3,
+                    COUNT(*) FILTER (WHERE risk_probability >= 0.6 AND risk_probability < 0.7) AS bin4,
+                    COUNT(*) FILTER (WHERE risk_probability >= 0.7 AND risk_probability < 0.8) AS bin5,
+                    COUNT(*) FILTER (WHERE risk_probability >= 0.8 AND risk_probability < 0.9) AS bin6,
+                    COUNT(*) FILTER (WHERE risk_probability >= 0.9)                            AS bin7
+                FROM aa_ml_predictions
+            """)
+            row = cur.fetchone()
+    return [{"c": row[f"bin{i}"], "col": col} for i, col in enumerate(colors)]
+
+
+# ---------------------------------------------------------------------------
+# All claims (with user info + latest ML prediction if flagged)
+# ---------------------------------------------------------------------------
+
+def db_get_all_claims() -> list:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    c.claim_id, c.user_id, c.treatment_type, c.claim_amount,
+                    c.submission_timestamp, c.submission_channel,
+                    c.missing_documents_flag, c.adjudicator_flag,
+                    c.claim_rejected_flag, c.resubmission_flag, c.original_claim_id,
+                    u.first_name, u.last_name, u.email,
+                    u.age_group, u.region, u.plan_type,
+                    u.membership_tenure_years, u.past_escalation_count,
+                    u.behavior_archetype,
+                    p.risk_band, p.risk_probability,
+                    p.created_at AS predicted_at
+                FROM claims c
+                LEFT JOIN users_backup u ON u.user_id = c.user_id
+                LEFT JOIN (
+                    SELECT DISTINCT ON (member_id)
+                        member_id, risk_band, risk_probability, created_at
+                    FROM aa_ml_predictions
+                    ORDER BY member_id, prediction_id DESC
+                ) p ON p.member_id = c.user_id
+                ORDER BY
+                    CASE
+                        WHEN p.risk_band = 'HIGH'   THEN 1
+                        WHEN p.risk_band = 'MEDIUM' THEN 2
+                        WHEN p.risk_band = 'LOW'    THEN 3
+                        ELSE 4
+                    END,
+                    p.risk_probability DESC NULLS LAST,
+                    c.submission_timestamp DESC
+            """)
+            rows = cur.fetchall()
+    return [dict(row) for row in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -301,33 +381,65 @@ def db_get_chart_data() -> list:
 # ---------------------------------------------------------------------------
 
 def db_get_scenarios() -> list:
+    # Single JOIN query replaces the N+1 loop that opened 3 new DB connections
+    # per row (claim + user + app_logs). With 10 scenarios that was 31 connections;
+    # with 20 it was 61 — each TCP handshake ~500ms = 10-30s total latency.
     with get_connection() as conn:
         with conn.cursor() as cur:
-            # Latest prediction per member
             cur.execute("""
-                SELECT DISTINCT ON (member_id)
-                    member_id, claim_id, risk_probability, risk_band
-                FROM aa_ml_predictions
-                ORDER BY member_id, prediction_id DESC
+                SELECT
+                    p.member_id, p.claim_id, p.risk_probability, p.risk_band,
+                    c.treatment_type, c.claim_amount, c.submission_timestamp,
+                    c.submission_channel, c.missing_documents_flag,
+                    c.adjudicator_flag, c.claim_rejected_flag,
+                    c.resubmission_flag, c.original_claim_id,
+                    u.first_name, u.last_name, u.email,
+                    u.age_group, u.region, u.plan_type,
+                    u.membership_tenure_years, u.past_escalation_count,
+                    u.behavior_archetype
+                FROM (
+                    SELECT DISTINCT ON (member_id)
+                        member_id, claim_id, risk_probability, risk_band
+                    FROM aa_ml_predictions
+                    ORDER BY member_id, prediction_id DESC
+                ) p
+                LEFT JOIN claims       c ON c.claim_id = p.claim_id
+                LEFT JOIN users_backup u ON u.user_id  = p.member_id
             """)
             rows = cur.fetchall()
 
     scenarios = []
     for row in rows:
-        member_id = row["member_id"]
-        claim_id = row["claim_id"]
-        claim = db_get_claim_details(claim_id) if claim_id else {}
-        user = db_get_user_details(member_id) if member_id else {}
-        app_logs = db_get_app_logs(member_id, claim_id) if member_id and claim_id else []
+        row = dict(row)
         scenarios.append({
-            "id": f"pred_{member_id}",
-            "risk_band": row["risk_band"],
+            "id":         f"pred_{row['member_id']}",
+            "risk_band":  row["risk_band"],
             "risk_score": row["risk_probability"],
-            "claim_id": claim_id,
-            "user_id": member_id,
-            "claim": claim if "error" not in claim else {},
-            "user": user if "error" not in user else {},
-            "app_logs": app_logs if isinstance(app_logs, list) else [],
+            "claim_id":   row["claim_id"],
+            "user_id":    row["member_id"],
+            "claim": {
+                "treatment_type":         row.get("treatment_type"),
+                "claim_amount":           row.get("claim_amount"),
+                "submission_timestamp":   row.get("submission_timestamp"),
+                "submission_channel":     row.get("submission_channel"),
+                "missing_documents_flag": row.get("missing_documents_flag"),
+                "adjudicator_flag":       row.get("adjudicator_flag"),
+                "claim_rejected_flag":    row.get("claim_rejected_flag"),
+                "resubmission_flag":      row.get("resubmission_flag"),
+                "original_claim_id":      row.get("original_claim_id"),
+            } if row.get("treatment_type") else {},
+            "user": {
+                "first_name":              row.get("first_name"),
+                "last_name":               row.get("last_name"),
+                "email":                   row.get("email"),
+                "age_group":               row.get("age_group"),
+                "region":                  row.get("region"),
+                "plan_type":               row.get("plan_type"),
+                "membership_tenure_years": row.get("membership_tenure_years"),
+                "past_escalation_count":   row.get("past_escalation_count"),
+                "behavior_archetype":      row.get("behavior_archetype"),
+            } if row.get("first_name") else {},
+            "app_logs": [],
         })
     return scenarios
 
@@ -392,6 +504,213 @@ def db_get_run_history(scenario_id: str) -> list:
     msg = "✅ Agent task complete." if status == "complete" else f"⚠️ Agent ended ({status})"
     events.append({"type": "complete", "data": {"message": msg}})
     return events
+
+
+# ---------------------------------------------------------------------------
+# Reports (completed agent runs with full context)
+# ---------------------------------------------------------------------------
+
+def db_get_reports() -> list:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    ar.run_id, ar.scenario_id, ar.member_id, ar.claim_id,
+                    ar.risk_score, ar.risk_band, ar.status,
+                    ar.started_at, ar.ended_at,
+                    EXTRACT(EPOCH FROM (ar.ended_at - ar.started_at))::int AS duration_sec,
+                    u.first_name, u.last_name, u.plan_type, u.region,
+                    c.treatment_type, c.claim_amount,
+                    i.actions_taken, i.reasoning AS agent_reasoning, i.actions_count,
+                    (SELECT COUNT(*) FROM aa_customer_emails      e WHERE e.run_id = ar.run_id) AS emails_sent,
+                    (SELECT COUNT(*) FROM aa_customer_notifications n WHERE n.run_id = ar.run_id) AS push_sent,
+                    (SELECT COUNT(*) FROM aa_scheduled_callbacks   cb WHERE cb.run_id = ar.run_id) AS callbacks,
+                    (SELECT COUNT(*) FROM aa_employee_alerts       ea WHERE ea.run_id = ar.run_id) AS alerts
+                FROM aa_agent_runs ar
+                LEFT JOIN users_backup u ON u.user_id = ar.member_id
+                LEFT JOIN claims       c ON c.claim_id = ar.claim_id
+                LEFT JOIN aa_interventions i ON i.run_id = ar.run_id
+                WHERE ar.status IN ('complete', 'max_steps')
+                ORDER BY ar.started_at DESC
+            """)
+            rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+def db_get_report_detail(run_id: int) -> dict:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            # Final AI summary = last reasoning step text
+            cur.execute("""
+                SELECT reasoning_text FROM aa_agent_reasoning_steps
+                WHERE run_id = %s ORDER BY step_number DESC LIMIT 1
+            """, (run_id,))
+            last_row = cur.fetchone()
+
+            cur.execute("SELECT COUNT(*) AS cnt FROM aa_agent_tool_calls       WHERE run_id = %s", (run_id,))
+            tool_count = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT COUNT(*) AS cnt FROM aa_agent_reasoning_steps WHERE run_id = %s", (run_id,))
+            reasoning_count = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT subject, body_html, created_at FROM aa_customer_emails WHERE run_id = %s ORDER BY created_at", (run_id,))
+            emails = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("SELECT title, body, created_at FROM aa_customer_notifications WHERE run_id = %s ORDER BY created_at", (run_id,))
+            notifications = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("SELECT callback_id, priority, notes, scheduled_for FROM aa_scheduled_callbacks WHERE run_id = %s", (run_id,))
+            callbacks = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("SELECT message, urgency, sla_minutes, created_at FROM aa_employee_alerts WHERE run_id = %s ORDER BY created_at", (run_id,))
+            alerts = [dict(r) for r in cur.fetchall()]
+
+    return {
+        "ai_summary":           last_row["reasoning_text"] if last_row else None,
+        "tool_call_count":      tool_count,
+        "reasoning_step_count": reasoning_count,
+        "emails":               emails,
+        "notifications":        notifications,
+        "callbacks":            callbacks,
+        "alerts":               alerts,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Human-in-the-loop tables setup
+# ---------------------------------------------------------------------------
+
+def db_setup_hitl_tables():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS aa_employee_questions (
+                    question_id  SERIAL PRIMARY KEY,
+                    run_id       INTEGER,
+                    scenario_id  VARCHAR,
+                    claim_id     VARCHAR,
+                    question     TEXT NOT NULL,
+                    context      TEXT,
+                    tool_call_id VARCHAR NOT NULL,
+                    response     TEXT,
+                    status       VARCHAR DEFAULT 'pending',
+                    created_at   TIMESTAMPTZ DEFAULT NOW(),
+                    responded_at TIMESTAMPTZ
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS aa_agent_paused_state (
+                    run_id          INTEGER PRIMARY KEY,
+                    scenario_id     VARCHAR,
+                    message_history JSONB NOT NULL,
+                    step            INTEGER DEFAULT 0,
+                    created_at      TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# aa_employee_questions
+# ---------------------------------------------------------------------------
+
+def db_log_employee_question(run_id: int, scenario_id: str, claim_id: str, question: str, context: str, tool_call_id: str) -> int:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO aa_employee_questions (run_id, scenario_id, claim_id, question, context, tool_call_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING question_id
+            """, (run_id, scenario_id, claim_id, question, context, tool_call_id))
+            qid = cur.fetchone()["question_id"]
+        conn.commit()
+    return qid
+
+
+def db_respond_to_question(question_id: int, response: str):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE aa_employee_questions
+                SET response = %s, status = 'responded', responded_at = NOW()
+                WHERE question_id = %s
+            """, (response, question_id))
+        conn.commit()
+
+
+def db_get_question(question_id: int) -> dict:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM aa_employee_questions WHERE question_id = %s", (question_id,))
+            row = cur.fetchone()
+    return dict(row) if row else {}
+
+
+def db_get_pending_questions() -> list:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT q.*,
+                       u.first_name, u.last_name,
+                       c.treatment_type, c.claim_amount,
+                       ar.risk_band
+                FROM aa_employee_questions q
+                LEFT JOIN aa_agent_runs ar ON ar.run_id = q.run_id
+                LEFT JOIN users_backup u ON u.user_id = ar.member_id
+                LEFT JOIN claims c ON c.claim_id = q.claim_id
+                WHERE q.status = 'pending'
+                ORDER BY q.created_at DESC
+            """)
+            rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# aa_agent_paused_state
+# ---------------------------------------------------------------------------
+
+def db_save_paused_state(run_id: int, scenario_id: str, messages: list, step: int):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO aa_agent_paused_state (run_id, scenario_id, message_history, step)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (run_id) DO UPDATE
+                SET message_history = EXCLUDED.message_history, step = EXCLUDED.step
+            """, (run_id, scenario_id, json.dumps(messages, default=str), step))
+        conn.commit()
+
+
+def db_get_paused_state(run_id: int) -> dict:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM aa_agent_paused_state WHERE run_id = %s", (run_id,))
+            row = cur.fetchone()
+    if not row:
+        return {}
+    d = dict(row)
+    if isinstance(d["message_history"], str):
+        d["message_history"] = json.loads(d["message_history"])
+    return d
+
+
+def db_get_all_alerts() -> list:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    ea.run_id, ea.claim_id, ea.message, ea.urgency, ea.sla_minutes, ea.created_at,
+                    u.first_name, u.last_name,
+                    c.treatment_type, c.claim_amount,
+                    ar.risk_band, ar.risk_score
+                FROM aa_employee_alerts ea
+                LEFT JOIN aa_agent_runs ar ON ar.run_id = ea.run_id
+                LEFT JOIN users_backup u ON u.user_id = ar.member_id
+                LEFT JOIN claims c ON c.claim_id = ea.claim_id
+                ORDER BY ea.created_at DESC
+            """)
+            rows = cur.fetchall()
+    return [dict(r) for r in rows]
 
 
 if __name__ == "__main__":

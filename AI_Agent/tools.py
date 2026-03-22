@@ -7,7 +7,7 @@ import os
 from database import (
     db_get_claim_details, db_get_user_details, db_get_app_logs,
     db_log_employee_alert, db_log_customer_email, db_log_customer_notification,
-    db_log_scheduled_callback, db_log_intervention
+    db_log_scheduled_callback, db_log_intervention, db_log_employee_question
 )
 
 from dotenv import load_dotenv
@@ -16,6 +16,12 @@ load_dotenv()
 
 # Set at the start of each agent run by agent.py
 _current_run_id = None
+_current_scenario_id = None
+
+
+def set_current_scenario_id(scenario_id: str):
+    global _current_scenario_id
+    _current_scenario_id = scenario_id
 
 
 def set_current_run_id(run_id: int):
@@ -100,6 +106,27 @@ def schedule_callback(user_id: str, claim_id: str, priority: str = "NORMAL", not
         "scheduled_for": scheduled_for,
         "assigned_to": assigned_to,
         "timestamp": datetime.now().isoformat()
+    }
+
+
+_PENDING_QUESTION_ID = None
+_PENDING_TOOL_CALL_ID = None
+
+
+def request_employee_input(claim_id: str, question: str, context: str, tool_call_id: str = None) -> dict:
+    """Called by the agent when it needs human input before proceeding."""
+    global _PENDING_QUESTION_ID, _PENDING_TOOL_CALL_ID
+    # tool_call_id is injected by agent.py before calling this function
+    tc_id = tool_call_id or _PENDING_TOOL_CALL_ID or "unknown"
+    question_id = db_log_employee_question(
+        _current_run_id, _current_scenario_id, claim_id, question, context, tc_id
+    )
+    _PENDING_QUESTION_ID = question_id
+    return {
+        "status": "awaiting_response",
+        "question_id": question_id,
+        "question": question,
+        "message": "Agent paused. Waiting for employee response before continuing."
     }
 
 
