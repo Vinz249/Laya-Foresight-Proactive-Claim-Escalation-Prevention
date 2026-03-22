@@ -249,8 +249,6 @@ def db_log_agent_error(run_id: int, error_message: str):
 
 def db_get_stats() -> dict:
     # Single round-trip: all counts in one query using CROSS JOIN subqueries.
-    # created_at >= CURRENT_DATE uses an index range scan; DATE(created_at)
-    # applied a function to every row and prevented index use entirely.
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -260,7 +258,15 @@ def db_get_stats() -> dict:
                     COALESCE(e.emails_sent,     0)  AS emails_sent,
                     COALESCE(n.push_sent,       0)  AS push_sent,
                     COALESCE(ea.slack_sent,     0)  AS slack_sent,
-                    COALESCE(tc.total_actions,  0)  AS total_actions
+                    COALESCE(tc.total_actions,  0)  AS total_actions,
+                    COALESCE(ar.active_cases,   0)  AS active_cases,
+                    COALESCE(ar.processed_today,0)  AS processed_today,
+                    COALESCE(ar.complete_runs,  0)  AS complete_runs,
+                    COALESCE(ar.total_runs,     0)  AS total_runs,
+                    CASE
+                        WHEN COALESCE(ar.total_runs, 0) = 0 THEN 0
+                        ELSE ROUND(100.0 * ar.complete_runs / ar.total_runs, 1)
+                    END AS success_rate
                 FROM (
                     SELECT
                         COUNT(*) FILTER (WHERE risk_band = 'HIGH')   AS high_risk,
@@ -268,13 +274,20 @@ def db_get_stats() -> dict:
                         COUNT(*) FILTER (WHERE risk_band = 'LOW')    AS low_risk,
                         COUNT(*)                                      AS total_predictions
                     FROM aa_ml_predictions
-                    WHERE created_at >= CURRENT_DATE
                 ) p
-                CROSS JOIN (SELECT COUNT(*) AS calls_prevented FROM aa_interventions          WHERE created_at >= CURRENT_DATE) i
-                CROSS JOIN (SELECT COUNT(*) AS emails_sent     FROM aa_customer_emails        WHERE created_at >= CURRENT_DATE) e
-                CROSS JOIN (SELECT COUNT(*) AS push_sent       FROM aa_customer_notifications WHERE created_at >= CURRENT_DATE) n
-                CROSS JOIN (SELECT COUNT(*) AS slack_sent      FROM aa_employee_alerts        WHERE created_at >= CURRENT_DATE) ea
-                CROSS JOIN (SELECT COUNT(*) AS total_actions   FROM aa_agent_tool_calls       WHERE created_at >= CURRENT_DATE) tc
+                CROSS JOIN (SELECT COUNT(*) AS calls_prevented FROM aa_interventions         ) i
+                CROSS JOIN (SELECT COUNT(*) AS emails_sent     FROM aa_customer_emails       ) e
+                CROSS JOIN (SELECT COUNT(*) AS push_sent       FROM aa_customer_notifications) n
+                CROSS JOIN (SELECT COUNT(*) AS slack_sent      FROM aa_employee_alerts       ) ea
+                CROSS JOIN (SELECT COUNT(*) AS total_actions   FROM aa_agent_tool_calls      ) tc
+                CROSS JOIN (
+                    SELECT
+                        COUNT(*) FILTER (WHERE status = 'running')                              AS active_cases,
+                        COUNT(*) FILTER (WHERE ended_at >= CURRENT_DATE)                        AS processed_today,
+                        COUNT(*) FILTER (WHERE status = 'complete')                             AS complete_runs,
+                        COUNT(*) FILTER (WHERE status IN ('complete', 'max_steps', 'error'))    AS total_runs
+                    FROM aa_agent_runs
+                ) ar
             """)
             return dict(cur.fetchone())
 
