@@ -122,3 +122,34 @@ CREATE TABLE aa_agent_errors (
     error_message       TEXT,
     created_at          TIMESTAMP DEFAULT NOW()
 );
+
+
+-- ============================================================
+-- Performance indexes
+-- ============================================================
+
+-- created_at range scans (used by /api/stats and /api/feed)
+CREATE INDEX IF NOT EXISTS idx_aa_ml_predictions_created_at     ON aa_ml_predictions (created_at);
+CREATE INDEX IF NOT EXISTS idx_aa_interventions_created_at      ON aa_interventions (created_at);
+CREATE INDEX IF NOT EXISTS idx_aa_customer_emails_created_at    ON aa_customer_emails (created_at);
+CREATE INDEX IF NOT EXISTS idx_aa_customer_notifs_created_at    ON aa_customer_notifications (created_at);
+CREATE INDEX IF NOT EXISTS idx_aa_employee_alerts_created_at    ON aa_employee_alerts (created_at);
+CREATE INDEX IF NOT EXISTS idx_aa_agent_tool_calls_created_at   ON aa_agent_tool_calls (created_at);
+CREATE INDEX IF NOT EXISTS idx_aa_scheduled_callbacks_created   ON aa_scheduled_callbacks (created_at);
+
+-- DISTINCT ON (member_id) ORDER BY member_id, prediction_id DESC
+CREATE INDEX IF NOT EXISTS idx_aa_ml_predictions_member_pred    ON aa_ml_predictions (member_id, prediction_id DESC);
+
+-- risk_probability range scan (used by /api/chart)
+CREATE INDEX IF NOT EXISTS idx_aa_ml_predictions_risk_prob      ON aa_ml_predictions (risk_probability);
+
+-- run_id FK indexes (speed up JOINs in /api/reports and /api/alerts)
+CREATE INDEX IF NOT EXISTS idx_aa_agent_runs_member_id          ON aa_agent_runs (member_id);
+CREATE INDEX IF NOT EXISTS idx_aa_agent_runs_claim_id           ON aa_agent_runs (claim_id);
+CREATE INDEX IF NOT EXISTS idx_aa_employee_alerts_run_id        ON aa_employee_alerts (run_id);
+CREATE INDEX IF NOT EXISTS idx_aa_customer_emails_run_id        ON aa_customer_emails (run_id);
+CREATE INDEX IF NOT EXISTS idx_aa_customer_notifs_run_id        ON aa_customer_notifications (run_id);
+CREATE INDEX IF NOT EXISTS idx_aa_scheduled_callbacks_run_id    ON aa_scheduled_callbacks (run_id);
+CREATE INDEX IF NOT EXISTS idx_aa_interventions_run_id          ON aa_interventions (run_id);
+CREATE INDEX IF NOT EXISTS idx_aa_reasoning_steps_run_id        ON aa_agent_reasoning_steps (run_id);
+CREATE INDEX IF NOT EXISTS idx_aa_tool_calls_run_id             ON aa_agent_tool_calls (run_id);
