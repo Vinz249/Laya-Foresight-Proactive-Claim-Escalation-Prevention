@@ -6,6 +6,10 @@ An AI-driven system built for Laya Healthcare to predict and prevent costly supp
 
 ---
 
+> **Note:** This is a fork of the original [Laya Healthcare Hackathon project](https://github.com/[org]/laya-foresight). 
+> I was the **Team Lead & ML Engineer** responsible for the Call Risk Classifier and system integration.
+> See [Team & Contributions](#team--contributions) below.
+
 ## 🛠 Tech Stack
 
 **Frontend:**
@@ -124,6 +128,32 @@ VITE_API_BASE_URL=http://localhost:8000
 npm run dev
 ```
 *The dashboard will be available at `http://localhost:5173/`.*
+
+---
+
+## Team & Contributions
+
+**NCI x Laya Healthcare Hackathon — Team 6 (Selected 1 of 8 from 50+)**
+
+### Vinayak Sharma — Team Lead & ML Engineer
+**My Contributions:**
+- **Project Ideation** — Conceptualized proactive escalation system after Laya stakeholder meeting
+- **Call Risk Classifier** — Designed, trained, tuned, and tested the binary classification model (48-hour prediction window)
+- **System Integration** — Developed scripts connecting trained classifier to Supabase database and orchestrating AI Agent pipeline
+- **Team Leadership** — Led team of 5 across data science, ML ops, infrastructure, and AI agent engineering
+
+**How It Works:**
+The classifier evaluates behavioral signals (app logins, status page reloads), claim signals (type, age, amount), 
+and historical signals (prior escalation history) to segment users into High/Medium/Low risk bands. 
+My scripts feed these predictions into the LayaAIAgent, which decides whether to send proactive messages or alert support teams.
+
+### Other Team Members
+- **Amod Aher** — Data Engineer & Analyst (EDA, feature selection, data validation)
+- **Shahnawaz Khan** — Infrastructure & ML Ops (system architecture, pipeline orchestration)
+- **Sivaavanish Kanagasabapathi** — AI Agent Engineer (agent workflow, backend/frontend, API)
+- **Ayush Srivastava** — Data Engineer (database design, 427K synthetic data, nightly pipeline)
+
+---
 
 ---
 
