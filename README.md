@@ -2,10 +2,6 @@
 
 An AI-driven system built for Laya Healthcare to predict and prevent costly support call escalations before they happen, giving users peace of mind during their health insurance claim process.
 
-![Laya Foresight Dashboard Preview](https://via.placeholder.com/800x400?text=Laya+Foresight+Dashboard) *(Note: Replace with actual screenshot/GIF if available)*
-
----
-
 > **Note:** This is a fork of the original [Laya Healthcare Hackathon project](https://github.com/[org]/laya-foresight). 
 > I was the **Team Lead & ML Engineer** responsible for the Call Risk Classifier and system integration.
 > See [Team & Contributions](#team--contributions) below.
